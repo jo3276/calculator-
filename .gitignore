@@ -1,0 +1,4 @@
+/target
+firebase-service-account.json
+.env
+*.log

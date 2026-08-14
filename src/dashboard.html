@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Device dashboard</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, system-ui, sans-serif;
+      --bg: #0f1218;
+      --surface: #171d28;
+      --surface-2: #202838;
+      --line: #334057;
+      --text: #edf3ff;
+      --muted: #aebbd4;
+      --primary: #3f73e8;
+      --primary-2: #294c9c;
+      --good: #7ee2a8;
+      --warn: #ffc568;
+      --danger: #d75067;
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); }
+    main { max-width: 1180px; margin: 0 auto; padding: 28px 20px 48px; }
+    h1 { margin: 0 0 8px; font-size: 30px; }
+    h2 { margin: 0; font-size: 18px; }
+    h3 { margin: 0 0 10px; font-size: 14px; color: #d7e2ff; }
+    p { margin: 0; }
+    a { color: #8caeff; }
+    small, .muted { color: var(--muted); }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(220px, 360px) minmax(160px, 220px) auto;
+      gap: 10px;
+      margin: 22px 0 16px;
+      align-items: center;
+    }
+
+    input, select, button {
+      min-height: 44px;
+      padding: 10px 13px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      color: inherit;
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+      background: var(--primary);
+      cursor: pointer;
+      font-weight: 700;
+    }
+
+    button.secondary { background: var(--surface-2); color: #dce7ff; border: 1px solid var(--line); }
+    button.danger { background: var(--danger); }
+    button:disabled { cursor: not-allowed; opacity: .42; }
+
+    .notice {
+      margin: 16px 0 18px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .notice strong { color: #ffffff; }
+    #message { min-height: 22px; margin: 12px 0; color: #c5d6ff; }
+    #command {
+      display: none;
+      margin: 0 0 18px;
+      padding: 12px;
+      overflow: auto;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #121824;
+      color: var(--muted);
+    }
+
+    .devices {
+      display: grid;
+      gap: 16px;
+    }
+
+    .device-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      overflow: hidden;
+    }
+
+    .device-header {
+      display: grid;
+      grid-template-columns: minmax(190px, 1fr) auto auto;
+      gap: 14px;
+      padding: 11px 14px;
+      background: #151b26;
+      align-items: center;
+      cursor: pointer;
+    }
+
+    .device-card.expanded .device-header { border-bottom: 1px solid var(--line); }
+    .device-title { font-size: 16px; font-weight: 750; }
+    .device-id { display: block; margin-top: 2px; word-break: break-all; font-size: 12px; }
+
+    .status {
+      min-width: 140px;
+      padding: 7px 10px;
+      border-radius: 8px;
+      text-align: center;
+      font-weight: 800;
+      background: #352917;
+      color: var(--warn);
+      font-size: 14px;
+    }
+
+    .status.ready {
+      background: #143521;
+      color: var(--good);
+    }
+
+    .expand-button {
+      width: 36px;
+      height: 36px;
+      min-height: 36px;
+      padding: 0;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+      border-radius: 8px;
+    }
+
+    .chevron {
+      width: 10px;
+      height: 10px;
+      border-right: 2px solid #e5edff;
+      border-bottom: 2px solid #e5edff;
+      transform: rotate(-45deg);
+      transition: transform .16s ease;
+    }
+
+    .device-card.expanded .chevron { transform: rotate(45deg); }
+
+    .device-body {
+      display: none;
+      grid-template-columns: 1fr 1.2fr;
+      gap: 14px;
+      padding: 14px;
+    }
+
+    .device-card.expanded .device-body { display: grid; }
+
+    .section {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #131924;
+      padding: 14px;
+    }
+
+    .section.location { grid-row: span 2; }
+    .metrics {
+      display: grid;
+      gap: 9px;
+      margin: 12px 0;
+    }
+
+    .metric {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 10px;
+      align-items: start;
+    }
+
+    .metric span:first-child { color: var(--muted); }
+
+    .location-map {
+      width: 100%;
+      min-height: 260px;
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+    }
+
+    .location-placeholder {
+      display: grid;
+      min-height: 260px;
+      margin-top: 14px;
+      padding: 18px;
+      place-items: center;
+      text-align: center;
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+    }
+
+    .button-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .full-button { width: 100%; margin-top: 12px; }
+    .saved-actions {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .saved-actions a {
+      display: flex;
+      min-height: 40px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+      color: #e5edff;
+      text-decoration: none;
+      font-weight: 700;
+    }
+
+    .danger-zone {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+
+    @media (max-width: 820px) {
+      main { padding: 22px 12px 40px; }
+      .toolbar, .device-body { grid-template-columns: 1fr; }
+      .device-header { grid-template-columns: 1fr auto; }
+      .status { grid-column: 1 / -1; }
+      .status { text-align: left; }
+      .button-grid, .saved-actions { grid-template-columns: 1fr; }
+      .metric { grid-template-columns: 1fr; gap: 2px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Device dashboard</h1>
+    <p class="muted">Manage your registered phones with separated request zones to avoid accidental commands.</p>
+
+    <div class="toolbar">
+      <input id="key" type="password" placeholder="Command API key" autocomplete="off">
+      <select id="filter" onchange="draw()">
+        <option value="all">All devices</option>
+        <option value="ready">Ready devices</option>
+      </select>
+      <button id="refresh" onclick="load()">Refresh</button>
+    </div>
+
+    <section class="notice">
+      <strong>Request safety:</strong>
+      <span class="muted">Location, camera, microphone, contacts, and phone details are separated below. Camera, microphone, contacts, and phone details only show manual upload buttons on the phone after you request them here.</span>
+    </section>
+
+    <div id="message">Loading devices...</div>
+    <pre id="command"></pre>
+    <section id="devices" class="devices"></section>
+  </main>
+
+  <script>
+    let devices = [];
+    const expandedDevices = new Set();
+    const byId = id => document.getElementById(id);
+    const commandKeyStorageKey = 'device-dashboard-command-key';
+    const message = text => byId('message').textContent = text;
+    const escape = value => {
+      const span = document.createElement('span');
+      span.textContent = value ?? '-';
+      return span.innerHTML;
+    };
+    const deviceName = device => `${device.manufacturer ?? 'Unknown'} ${device.model ?? 'device'}`.trim();
+
+    function relativeTime(value) {
+      if (!value) return '-';
+      const time = new Date(value.endsWith('Z') ? value : value + 'Z').getTime();
+      const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000));
+      if (seconds < 60) return `${seconds} sec ago`;
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes} min ago`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+      const days = Math.floor(hours / 24);
+      return `${days} day${days === 1 ? '' : 's'} ago`;
+    }
+
+    async function load({ silent = false } = {}) {
+      const refresh = byId('refresh');
+      refresh.disabled = true;
+      if (!silent) message('Refreshing devices...');
+      try {
+        const response = await fetch('/devices', { cache: 'no-store' });
+        if (!response.ok) throw Error(await response.text());
+        devices = await response.json();
+        draw();
+        if (!silent) message(`${devices.length} device(s) loaded`);
+      } catch (error) {
+        message('Could not load devices: ' + error.message);
+      } finally {
+        refresh.disabled = false;
+      }
+    }
+
+    const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+    async function waitForLocationResult(deviceId, previousLocationTime) {
+      const deadline = Date.now() + 90_000;
+      const command = byId('command');
+
+      while (Date.now() < deadline) {
+        await delay(5_000);
+        await load({ silent: true });
+
+        const device = devices.find(candidate => candidate.device_id === deviceId);
+        if (!device) return;
+
+        if (device.location_time && device.location_time !== previousLocationTime) {
+          command.textContent = 'Fresh GPS fix uploaded. The map and coordinates are now updated.';
+          message('Location received.');
+          return;
+        }
+
+        const status = device.last_command_status || '';
+        if (/no (fresh gps fix|location fix)|failed|permission/i.test(status)) {
+          command.textContent = `Location request finished: ${status}`;
+          message('Location was not uploaded.');
+          return;
+        }
+
+        const secondsLeft = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+        command.textContent = `Waiting for the phone to return a fresh GPS fix... (${secondsLeft} sec remaining)`;
+      }
+
+      command.textContent = 'No location update was received within 90 seconds. Check the phone GPS and location permission, then try again.';
+      message('Location request timed out.');
+    }
+
+    function draw() {
+      const readyOnly = byId('filter').value === 'ready';
+      const container = byId('devices');
+      container.innerHTML = '';
+      const visibleDevices = devices.filter(device => !readyOnly || device.command_ready);
+
+      if (!visibleDevices.length) {
+        container.innerHTML = '<section class="notice"><strong>No devices to show.</strong><br><span class="muted">Install/open the updated app once, then refresh this page.</span></section>';
+        return;
+      }
+
+      for (const device of visibleDevices) {
+        const name = escape(deviceName(device));
+        const id = escape(device.device_id);
+        const ready = device.command_ready;
+        const statusLabel = device.online
+          ? 'Online now'
+          : ready ? 'FCM token registered' : 'Open updated app';
+        const statusClass = device.online ? 'ready' : '';
+        const mapLink = device.latitude == null
+          ? '-'
+          : `<a target="_blank" rel="noreferrer" href="https://www.google.com/maps?q=${device.latitude},${device.longitude}">${device.latitude.toFixed(6)}, ${device.longitude.toFixed(6)}</a>`;
+        const locationMap = device.latitude == null
+          ? '<div class="location-placeholder">A map will appear here after the phone uploads a GPS fix.</div>'
+          : `<iframe class="location-map" title="Device location map" loading="lazy" src="https://www.google.com/maps?q=${device.latitude},${device.longitude}&z=16&output=embed"></iframe>`;
+        const accuracy = device.location_accuracy_meters == null ? '-' : `${Math.round(device.location_accuracy_meters)} m`;
+        const detailsUrl = `/devices/${encodeURIComponent(device.device_id)}/details`;
+        const disabled = ready ? '' : 'disabled';
+        const expanded = expandedDevices.has(device.device_id);
+
+        const card = document.createElement('article');
+        card.className = `device-card ${expanded ? 'expanded' : ''}`;
+        card.innerHTML = `
+          <header class="device-header" onclick="toggleDevice('${device.device_id}')">
+            <div>
+              <div class="device-title">${name}</div>
+              <small class="device-id">${id}</small>
+            </div>
+            <div class="status ${statusClass}">${statusLabel}</div>
+            <button class="expand-button" type="button" aria-label="${expanded ? 'Collapse' : 'Expand'} device" onclick="event.stopPropagation(); toggleDevice('${device.device_id}')">
+              <span class="chevron"></span>
+            </button>
+          </header>
+          <div class="device-body">
+            <section class="section location">
+              <h3>Location Request</h3>
+              <p class="muted">Use this only when you need a fresh GPS update.</p>
+              <div class="metrics">
+                <div class="metric"><span>Last GPS fix</span><strong>${relativeTime(device.location_time)}</strong></div>
+                <div class="metric"><span>Accuracy</span><strong>${accuracy}</strong></div>
+                <div class="metric"><span>Coordinates</span><strong>${mapLink}</strong></div>
+              </div>
+              ${locationMap}
+              <button class="full-button" ${disabled} onclick="locate('${device.device_id}')">Request Location</button>
+            </section>
+
+            <section class="section">
+              <h3>On-demand Device Data</h3>
+              <p class="muted">Each request asks the enrolled phone for a fresh, one-time snapshot.</p>
+              <div class="button-grid">
+                <button ${disabled} onclick="requestCapability('${device.device_id}','camera')">Request Camera Photo</button>
+                <button ${disabled} onclick="requestCapability('${device.device_id}','microphone')">Request Voice Note</button>
+                <button ${disabled} onclick="requestCapability('${device.device_id}','contacts')">Request Contacts</button>
+                <button ${disabled} onclick="requestCapability('${device.device_id}','call_history')">Request Current Call History</button>
+                <button ${disabled} onclick="requestCapability('${device.device_id}','phone_details')">Request Phone Info</button>
+              </div>
+            </section>
+
+            <section class="section">
+              <h3>Saved Data</h3>
+              <p class="muted">Open the details page to view uploaded photos, voice notes, contacts, current call history, and phone info.</p>
+              <div class="saved-actions">
+                <a href="${detailsUrl}#photos">Photos</a>
+                <a href="${detailsUrl}#voice">Voice</a>
+                <a href="${detailsUrl}#contacts">Contacts</a>
+                <a href="${detailsUrl}#calls">Call History</a>
+              </div>
+              <a class="full-button secondary" style="display:flex;align-items:center;justify-content:center;text-decoration:none;" href="${detailsUrl}">Open Full Details</a>
+              <div class="danger-zone">
+                <small>Remove this device from the dashboard only.</small>
+                <button class="danger" onclick="deleteDevice('${device.device_id}', '${name.replace(/'/g, '&#39;')}')">Delete Device</button>
+              </div>
+            </section>
+
+            <section class="section">
+              <h3>Latest Command Result</h3>
+              <div class="metrics">
+                <div class="metric"><span>Status</span><strong>${escape(device.last_command_status)}</strong></div>
+                <div class="metric"><span>Updated</span><strong>${relativeTime(device.last_command_status_time)}</strong></div>
+                <div class="metric"><span>Last seen</span><strong>${relativeTime(device.last_seen)}</strong></div>
+              </div>
+            </section>
+          </div>`;
+        container.appendChild(card);
+      }
+    }
+
+    function toggleDevice(deviceId) {
+      if (expandedDevices.has(deviceId)) {
+        expandedDevices.delete(deviceId);
+      } else {
+        expandedDevices.add(deviceId);
+      }
+      draw();
+    }
+
+    function requireCommandKey() {
+      const key = byId('key').value.trim();
+      if (!key) {
+        message('Enter the command API key first.');
+        byId('key').focus();
+        return null;
+      }
+      sessionStorage.setItem(commandKeyStorageKey, key);
+      return key;
+    }
+
+    function confirmRequest(label, deviceId) {
+      return confirm(`${label} for this device?\n\nDevice ID: ${deviceId}`);
+    }
+
+    function chooseCameraFacing() {
+      const choice = prompt('Which camera should the phone use? Type front or back.', 'front');
+      if (choice === null) return null;
+      const normalized = choice.trim().toLowerCase();
+      if (normalized === 'front' || normalized === 'back') return normalized;
+      message('Camera request cancelled: type front or back.');
+      return null;
+    }
+
+    async function locate(deviceId) {
+      const key = requireCommandKey();
+      if (!key || !confirmRequest('Send location request', deviceId)) return;
+      const previousLocationTime = devices.find(device => device.device_id === deviceId)?.location_time ?? null;
+      message('Sending Firebase location request...');
+      const command = byId('command');
+      command.style.display = 'block';
+      command.textContent = `Backend received: POST /devices/${deviceId}/locate\nWaiting for the phone to return a fresh GPS fix...`;
+      try {
+        const response = await fetch('/devices/' + encodeURIComponent(deviceId) + '/locate', {
+          method: 'POST',
+          headers: { 'x-api-key': key }
+        });
+        const text = await response.text();
+        if (!response.ok) throw Error(text);
+        message(text);
+        void waitForLocationResult(deviceId, previousLocationTime);
+      } catch (error) {
+        message('Location request failed: ' + error.message);
+      }
+    }
+
+    async function requestCapability(deviceId, capability) {
+      const labels = {
+        camera: 'Request camera photo',
+        microphone: 'Request voice note',
+        contacts: 'Request contacts upload',
+        call_history: 'Request current call history',
+        phone_details: 'Request phone info upload'
+      };
+      let requestedCapability = capability;
+      let requestLabel = labels[capability] ?? 'Request upload';
+      if (capability === 'camera') {
+        const cameraFacing = chooseCameraFacing();
+        if (!cameraFacing) return;
+        requestedCapability = `camera_${cameraFacing}`;
+        requestLabel = `Request ${cameraFacing} camera photo`;
+      }
+      const key = requireCommandKey();
+      if (!key || !confirmRequest(requestLabel, deviceId)) return;
+      message('Sending manual upload request...');
+      const command = byId('command');
+      command.style.display = 'block';
+      command.textContent = `Backend received: POST /devices/${deviceId}/capabilities/${requestedCapability}/request\nWaiting for the phone user to open Device Manager and upload manually...`;
+      try {
+        const response = await fetch('/devices/' + encodeURIComponent(deviceId) + '/capabilities/' + encodeURIComponent(requestedCapability) + '/request', {
+          method: 'POST',
+          headers: { 'x-api-key': key }
+        });
+        const text = await response.text();
+        if (!response.ok) throw Error(text);
+        message(text);
+        setTimeout(load, 5000);
+      } catch (error) {
+        message('Upload request failed: ' + error.message);
+      }
+    }
+
+    async function deleteDevice(deviceId, name) {
+      if (!confirm(`Delete ${name || 'this device'} from the dashboard?\n\nDevice ID: ${deviceId}\n\nThis does not uninstall the phone app.`)) return;
+      message('Deleting device...');
+      try {
+        const response = await fetch('/devices/' + encodeURIComponent(deviceId), { method: 'DELETE' });
+        const text = await response.text();
+        if (!response.ok) throw Error(text);
+        message(text);
+        await load();
+      } catch (error) {
+        message('Delete failed: ' + error.message);
+      }
+    }
+
+    byId('key').value = sessionStorage.getItem(commandKeyStorageKey) ?? '';
+    byId('key').addEventListener('input', event => {
+      const key = event.target.value.trim();
+      if (key) {
+        sessionStorage.setItem(commandKeyStorageKey, key);
+      } else {
+        sessionStorage.removeItem(commandKeyStorageKey);
+      }
+    });
+
+    load();
+    setInterval(load, 15000);
+    setInterval(draw, 1000);
+  </script>
+</body>
+</html>
