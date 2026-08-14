@@ -1393,7 +1393,29 @@ async fn main() // this mark the pogram entry point and enable aync rust using t
     let db = connect_db().await; //connect to postgress
 
     sqlx::query(
-        //ensure required colums exist in the devices table
+        "
+        CREATE TABLE IF NOT EXISTS devices (
+            device_id TEXT PRIMARY KEY,
+            manufacturer TEXT,
+            model TEXT,
+            android_version TEXT,
+            latitude DOUBLE PRECISION,
+            longitude DOUBLE PRECISION,
+            location_accuracy_meters DOUBLE PRECISION,
+            location_time TIMESTAMP,
+            last_command_status TEXT,
+            last_command_status_time TIMESTAMP,
+            fcm_token TEXT,
+            last_seen TIMESTAMP
+        )
+        ",
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to ensure devices table");
+
+    sqlx::query(
+        //ensure required columns exist in the devices table if upgraded
         "
         ALTER TABLE devices
         ADD COLUMN IF NOT EXISTS manufacturer TEXT,
