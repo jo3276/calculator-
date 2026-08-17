@@ -1351,6 +1351,12 @@ async fn request_capability_upload_command(
         format!(" ({count} latest photos)")
     } else if stored_capability == "microphone" {
         format!(" ({duration_seconds}s voice note)")
+    } else if stored_capability == "camera" {
+        if duration_seconds > 0 {
+            format!(" ({count} photos, {duration_seconds}s delay)")
+        } else {
+            format!(" ({count} photos)")
+        }
     } else {
         String::new()
     };
