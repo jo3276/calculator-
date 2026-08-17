@@ -169,6 +169,12 @@ struct PhoneDetailsRequest {
     model: String,
     android_version: String,
     sdk_int: i32,
+    screen_state: Option<String>,
+    sim_operator: Option<String>,
+    sim_carrier: Option<String>,
+    sim_number: Option<String>,
+    sim_country: Option<String>,
+    sim_serial: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -498,7 +504,13 @@ async fn update_phone_details(
         SET manufacturer = $2,
             model = $3,
             android_version = $4,
-            last_command_status = $5,
+            screen_state = COALESCE($5, screen_state),
+            sim_operator = COALESCE($6, sim_operator),
+            sim_carrier = COALESCE($7, sim_carrier),
+            sim_number = COALESCE($8, sim_number),
+            sim_country = COALESCE($9, sim_country),
+            sim_serial = COALESCE($10, sim_serial),
+            last_command_status = $11,
             last_command_status_time = NOW(),
             last_seen = NOW()
         WHERE device_id = $1
@@ -508,6 +520,12 @@ async fn update_phone_details(
     .bind(&request.manufacturer)
     .bind(&request.model)
     .bind(format!("{} (SDK {})", request.android_version, request.sdk_int))
+    .bind(&request.screen_state)
+    .bind(&request.sim_operator)
+    .bind(&request.sim_carrier)
+    .bind(&request.sim_number)
+    .bind(&request.sim_country)
+    .bind(&request.sim_serial)
     .bind("Phone details uploaded")
     .execute(&state.db)
     .await
@@ -517,6 +535,23 @@ async fn update_phone_details(
             "Could not save phone details".to_string(),
         )
     })?;
+
+    if request.sim_carrier.is_some() || request.sim_number.is_some() || request.sim_serial.is_some() {
+        let _ = sqlx::query(
+            "
+            INSERT INTO device_sim_history (device_id, sim_carrier, sim_operator, sim_number, sim_country, sim_serial, event_type, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, 'snapshot', NOW())
+            ",
+        )
+        .bind(&request.device_id)
+        .bind(&request.sim_carrier)
+        .bind(&request.sim_operator)
+        .bind(&request.sim_number)
+        .bind(&request.sim_country)
+        .bind(&request.sim_serial)
+        .execute(&state.db)
+        .await;
+    }
 
     mark_capability_request_fulfilled(&state, &request.device_id, "phone_details").await?;
 
@@ -892,12 +927,21 @@ async fn upload_media(
     State(state): State<AppState>,
     Json(request): Json<MediaUploadRequest>,
 ) -> Result<Json<LocationResponse>, (StatusCode, String)> {
-    let required_capability = match request.media_type.as_str() {
-        "photo" => "camera",
-        "voice" => "microphone",
-        _ => return Err((StatusCode::BAD_REQUEST, "Unsupported media type".to_string())),
+    let matched_capability = if request.media_type == "photo" {
+        if require_pending_capability_request(&state, &request.device_id, "camera").await.is_ok() {
+            "camera"
+        } else if require_pending_capability_request(&state, &request.device_id, "gallery").await.is_ok() {
+            "gallery"
+        } else {
+            return Err((StatusCode::BAD_REQUEST, "No pending camera or gallery photo request found".to_string()));
+        }
+    } else if request.media_type == "voice" {
+        require_pending_capability_request(&state, &request.device_id, "microphone").await?;
+        "microphone"
+    } else {
+        return Err((StatusCode::BAD_REQUEST, "Unsupported media type".to_string()));
     };
-    require_pending_capability_request(&state, &request.device_id, required_capability).await?;
+
     sqlx::query(
         "
         INSERT INTO device_media (device_id, media_type, content_type, base64_data, created_at)
@@ -926,11 +970,11 @@ async fn upload_media(
         ",
     )
     .bind(&request.device_id)
-    .bind(format!("{} uploaded by user", request.media_type))
+    .bind(format!("{} uploaded by user", if matched_capability == "gallery" { "Gallery photo" } else { "Photo" }))
     .execute(&state.db)
     .await
     .ok();
-    mark_capability_request_fulfilled(&state, &request.device_id, required_capability).await?;
+    mark_capability_request_fulfilled(&state, &request.device_id, matched_capability).await?;
 
     Ok(Json(LocationResponse {
         message: format!("{} uploaded", request.media_type),
@@ -1663,7 +1707,8 @@ async fn device_details_page(
     <a href="/">Back to dashboard</a>
     <h1>Device details</h1>
     <p class="muted" id="device-id"></p>
-    <p     <section id="phone"><div class="section-head"><h2>Phone</h2><button class="danger" onclick="deleteScope('all')">Delete All Saved Data</button></div><div id="phone-content">Loading...</div></section>
+    <section id="phone"><div class="section-head"><h2>Phone & Hardware Status</h2><button class="danger" onclick="deleteScope('all')">Delete All Saved Data</button></div><div id="phone-content">Loading...</div></section>
+    <section id="sim"><div class="section-head"><h2>📶 SIM Card & Cellular Telemetry</h2><button class="danger" onclick="deleteScope('sim_history')">Delete SIM History</button></div><div id="sim-content">Loading...</div></section>
     <section id="alerts"><div class="section-head"><h2>Live Alerts & Security Events</h2><button class="danger" onclick="deleteScope('alerts')">Delete All Alerts</button></div><div id="alerts-content">Loading...</div></section>
     <section id="geofences"><div class="section-head"><h2>Geofence Safety Zones</h2><button class="danger" onclick="deleteScope('geofences')">Delete All Geofences</button></div><div id="geofence-form" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;"><input id="geo-name" placeholder="Zone name (e.g. Home)" style="padding:6px 8px;border-radius:6px;border:1px solid #30394c;background:#121824;color:#eef2ff;"><input id="geo-lat" type="number" step="any" placeholder="Latitude" style="width:110px;padding:6px 8px;border-radius:6px;border:1px solid #30394c;background:#121824;color:#eef2ff;"><input id="geo-lon" type="number" step="any" placeholder="Longitude" style="width:110px;padding:6px 8px;border-radius:6px;border:1px solid #30394c;background:#121824;color:#eef2ff;"><input id="geo-radius" type="number" placeholder="Radius (meters)" value="200" style="width:110px;padding:6px 8px;border-radius:6px;border:1px solid #30394c;background:#121824;color:#eef2ff;"><button onclick="addGeofence()">+ Add Geofence</button></div><div id="geofences-content">Loading...</div></section>
     <section id="app_usage"><div class="section-head"><h2>App Usage & Screen Time</h2><button class="danger" onclick="deleteScope('app_usage')">Delete App Usage</button></div><div id="usage-content">Loading...</div></section>
@@ -1708,7 +1753,12 @@ async fn device_details_page(
       if (audioIsPlaying()) return;
       const response = await fetch('/devices/'+encodeURIComponent(deviceId)+'/details-data?t='+Date.now(), {{cache:'no-store'}});
       const data = await response.json();
-      byId('phone-content').innerHTML = `<table><tr><th>Manufacturer</th><td>${{text(data.device.manufacturer)}}</td></tr><tr><th>Model</th><td>${{text(data.device.model)}}</td></tr><tr><th>Android</th><td>${{text(data.device.android_version)}}</td></tr><tr><th>Last seen</th><td>${{text(data.device.last_seen)}}</td></tr></table>`;
+      const screenBadge = data.device.screen_state ? `<span style="padding:3px 8px;border-radius:6px;font-weight:700;background:${{data.device.screen_state.includes('Unlocked')?'#166534':data.device.screen_state.includes('Locked')?'#854d0e':'#374151'}};color:#f0fdf4;">${{text(data.device.screen_state)}}</span>` : '-';
+      byId('phone-content').innerHTML = `<table><tr><th>Screen State</th><td>${{screenBadge}}</td></tr><tr><th>Manufacturer</th><td>${{text(data.device.manufacturer)}}</td></tr><tr><th>Model</th><td>${{text(data.device.model)}}</td></tr><tr><th>Android</th><td>${{text(data.device.android_version)}}</td></tr><tr><th>Last seen</th><td>${{text(data.device.last_seen)}}</td></tr></table>`;
+      
+      const currentSim = `<table><tr><th>Active Carrier</th><td><strong>${{text(data.device.sim_carrier)}}</strong></td></tr><tr><th>SIM Operator</th><td>${{text(data.device.sim_operator)}}</td></tr><tr><th>SIM Phone Number</th><td><strong style="color:#38bdf8;">${{text(data.device.sim_number)}}</strong></td></tr><tr><th>Country ISO</th><td>${{text(data.device.sim_country)}}</td></tr><tr><th>SIM Serial / ICCID</th><td><code>${{text(data.device.sim_serial)}}</code></td></tr></table>`;
+      const simHistoryRows = data.sim_history && data.sim_history.length ? `<h4>SIM Swap / State History</h4><table><thead><tr><th>When</th><th>Event</th><th>Carrier</th><th>Number</th><th>Serial</th></tr></thead><tbody>${{data.sim_history.map(s=>`<tr><td>${{new Date(s.created_at).toLocaleString()}}</td><td><span style="padding:2px 6px;border-radius:4px;font-size:12px;background:#1e293b;">${{text(s.event_type)}}</span></td><td><strong>${{text(s.sim_carrier)}}</strong></td><td>${{text(s.sim_number)}}</td><td><code>${{text(s.sim_serial)}}</code></td></tr>`).join('')}}</tbody></table>` : '<p class="muted" style="margin-top:12px;">No SIM swap events recorded yet.</p>';
+      byId('sim-content').innerHTML = currentSim + simHistoryRows;
       
       byId('alerts-content').innerHTML = data.alerts && data.alerts.length ? `<table><thead><tr><th>Severity</th><th>Event</th><th>Details</th><th>When</th><th>Action</th></tr></thead><tbody>${{data.alerts.map(a=>`<tr><td><span style="padding:3px 8px;border-radius:4px;font-weight:700;font-size:12px;background:${{a.severity==='critical'?'#d75067':a.severity==='warning'?'#eab308':'#3b82f6'}}">${{text(a.severity)}}</span></td><td><strong>${{text(a.title)}}</strong></td><td>${{text(a.message)}}</td><td>${{new Date(a.created_at).toLocaleString()}}</td><td><button class="danger" onclick="deleteAlert(${{a.id}})">Delete</button></td></tr>`).join('')}}</tbody></table>` : '<p class="muted">No alerts or security events logged yet.</p>';
       
@@ -1937,6 +1987,24 @@ async fn device_details_data(
             "content_type": row.get::<String, _>("content_type"),
             "base64_data": row.get::<String, _>("base64_data"),
             "created_at": row.get::<chrono::NaiveDateTime, _>("created_at")
+        })).collect::<Vec<_>>(),
+        "sim_history": sqlx::query(
+            "SELECT id, sim_carrier, sim_operator, sim_number, sim_country, sim_serial, event_type, created_at FROM device_sim_history WHERE device_id = $1 ORDER BY created_at DESC LIMIT 50",
+        )
+        .bind(&device_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| serde_json::json!({
+            "id": row.get::<i32, _>("id"),
+            "sim_carrier": row.get::<Option<String>, _>("sim_carrier"),
+            "sim_operator": row.get::<Option<String>, _>("sim_operator"),
+            "sim_number": row.get::<Option<String>, _>("sim_number"),
+            "sim_country": row.get::<Option<String>, _>("sim_country"),
+            "sim_serial": row.get::<Option<String>, _>("sim_serial"),
+            "event_type": row.get::<String, _>("event_type"),
+            "created_at": row.get::<chrono::NaiveDateTime, _>("created_at")
         })).collect::<Vec<_>>()
     })))
 }
@@ -1947,13 +2015,18 @@ async fn list_devices(
 ) -> Result<Json<Vec<Device>>, DashboardAuthError> {
     require_dashboard_auth(&headers)?;
     let devices = sqlx::query_as::<_, Device>(
-        //GET /devices now returns location.
         "
         SELECT
           device_id,
           manufacturer,
           model,
           android_version,
+          screen_state,
+          sim_operator,
+          sim_carrier,
+          sim_number,
+          sim_country,
+          sim_serial,
           latitude, 
           longitude,
           location_accuracy_meters,
@@ -1984,6 +2057,12 @@ async fn list_online_devices(
           manufacturer,
           model,
           android_version,
+          screen_state,
+          sim_operator,
+          sim_carrier,
+          sim_number,
+          sim_country,
+          sim_serial,
           latitude,
           longitude,
           location_accuracy_meters,
@@ -2004,9 +2083,8 @@ async fn list_online_devices(
 }
 
 #[tokio::main]
-async fn main() // this mark the pogram entry point and enable aync rust using tokio
-               { 
-    let db = connect_db().await; //connect to postgress
+async fn main() {
+    let db = connect_db().await;
 
     sqlx::query(
         "
@@ -2015,6 +2093,12 @@ async fn main() // this mark the pogram entry point and enable aync rust using t
             manufacturer TEXT,
             model TEXT,
             android_version TEXT,
+            screen_state TEXT,
+            sim_operator TEXT,
+            sim_carrier TEXT,
+            sim_number TEXT,
+            sim_country TEXT,
+            sim_serial TEXT,
             latitude DOUBLE PRECISION,
             longitude DOUBLE PRECISION,
             location_accuracy_meters DOUBLE PRECISION,
@@ -2031,12 +2115,17 @@ async fn main() // this mark the pogram entry point and enable aync rust using t
     .expect("Failed to ensure devices table");
 
     sqlx::query(
-        //ensure required columns exist in the devices table if upgraded
         "
         ALTER TABLE devices
         ADD COLUMN IF NOT EXISTS manufacturer TEXT,
         ADD COLUMN IF NOT EXISTS model TEXT,
         ADD COLUMN IF NOT EXISTS android_version TEXT,
+        ADD COLUMN IF NOT EXISTS screen_state TEXT,
+        ADD COLUMN IF NOT EXISTS sim_operator TEXT,
+        ADD COLUMN IF NOT EXISTS sim_carrier TEXT,
+        ADD COLUMN IF NOT EXISTS sim_number TEXT,
+        ADD COLUMN IF NOT EXISTS sim_country TEXT,
+        ADD COLUMN IF NOT EXISTS sim_serial TEXT,
         ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION,
         ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION,
         ADD COLUMN IF NOT EXISTS location_accuracy_meters DOUBLE PRECISION,
@@ -2049,6 +2138,25 @@ async fn main() // this mark the pogram entry point and enable aync rust using t
     .execute(&db)
     .await
     .expect("Failed to ensure device info columns");
+
+    sqlx::query(
+        "
+        CREATE TABLE IF NOT EXISTS device_sim_history (
+            id SERIAL PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            sim_carrier TEXT,
+            sim_operator TEXT,
+            sim_number TEXT,
+            sim_country TEXT,
+            sim_serial TEXT,
+            event_type TEXT NOT NULL DEFAULT 'snapshot',
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        ",
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to ensure device sim history table");
 
     sqlx::query(
         "

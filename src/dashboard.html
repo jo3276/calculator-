@@ -378,6 +378,13 @@
         const disabled = ready ? '' : 'disabled';
         const expanded = expandedDevices.has(device.device_id);
 
+        const screenState = device.screen_state || 'Screen State: -';
+        const screenBadgeStyle = screenState.includes('Unlocked')
+          ? 'background:#143521;color:#7ee2a8;'
+          : screenState.includes('Locked')
+          ? 'background:#3d2f14;color:#fde047;'
+          : 'background:#1f293d;color:#93c5fd;';
+
         const card = document.createElement('article');
         card.className = `device-card ${expanded ? 'expanded' : ''}`;
         card.innerHTML = `
@@ -385,6 +392,10 @@
             <div>
               <div class="device-title">${name}</div>
               <small class="device-id">${id}</small>
+              <div style="margin-top:4px;">
+                <span style="display:inline-block;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:700;${screenBadgeStyle}">📱 ${escape(screenState)}</span>
+                ${device.sim_carrier ? `<span style="display:inline-block;margin-left:4px;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:700;background:#1e293b;color:#38bdf8;">📶 ${escape(device.sim_carrier)} ${device.sim_number ? '('+escape(device.sim_number)+')' : ''}</span>` : ''}
+              </div>
             </div>
             <div class="status ${statusClass}">${statusLabel}</div>
             <button class="expand-button" type="button" aria-label="${expanded ? 'Collapse' : 'Expand'} device" onclick="event.stopPropagation(); toggleDevice('${device.device_id}')">
@@ -421,9 +432,21 @@
             </section>
 
             <section class="section">
+              <h3>📶 SIM & Hardware Telemetry</h3>
+              <div class="metrics">
+                <div class="metric"><span>Screen State</span><strong style="color:#7ee2a8;">${escape(device.screen_state || 'Unknown')}</strong></div>
+                <div class="metric"><span>SIM Carrier</span><strong>${escape(device.sim_carrier || 'Not reported yet')}</strong></div>
+                <div class="metric"><span>SIM Number</span><strong style="color:#38bdf8;">${escape(device.sim_number || '-')}</strong></div>
+                <div class="metric"><span>SIM Operator</span><strong>${escape(device.sim_operator || '-')}</strong></div>
+                <div class="metric"><span>SIM Country</span><strong>${escape(device.sim_country || '-')}</strong></div>
+              </div>
+            </section>
+
+            <section class="section">
               <h3>Saved Data & Controls</h3>
               <p class="muted">Open the details page to view live alerts, geofences, screen time, notifications, photos, voice notes, contacts, and call history.</p>
               <div class="saved-actions">
+                <a href="${detailsUrl}#sim" style="border-color:#38bdf8;color:#38bdf8;">SIM Info</a>
                 <a href="${detailsUrl}#alerts" style="border-color:#eab308;color:#fde047;">Alerts</a>
                 <a href="${detailsUrl}#geofences">Geofences</a>
                 <a href="${detailsUrl}#app_usage">App Usage</a>

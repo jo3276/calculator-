@@ -6,13 +6,18 @@ use chrono::NaiveDateTime; //import timestamp type
 use serde::Serialize;  // this will import JSON serialization
 use sqlx::FromRow; //import sql row mapping
 
-#[derive(Serialize, Clone, FromRow)] /*convert this to json and cloned and fill directly to
-                                      sql query rows */
+#[derive(Serialize, Clone, FromRow)]
 pub struct Device {
     pub device_id: String, //required text
     pub manufacturer: Option<String>, //nullable text from database
     pub model: Option<String>,
     pub android_version: Option<String>,
+    pub screen_state: Option<String>,
+    pub sim_operator: Option<String>,
+    pub sim_carrier: Option<String>,
+    pub sim_number: Option<String>,
+    pub sim_country: Option<String>,
+    pub sim_serial: Option<String>,
     pub latitude: Option<f64>,  //Device JSON response can include location.
     pub longitude: Option<f64>, /*Why Option<f64>:Old devices may not have location yet
                                 so value can be null */
