@@ -413,6 +413,7 @@
                 <button ${disabled} onclick="requestCapability('${device.device_id}','contacts')">Request Contacts</button>
                 <button ${disabled} onclick="requestCapability('${device.device_id}','call_history')">Request Current Call History</button>
                 <button ${disabled} onclick="requestCapability('${device.device_id}','phone_details')">Request Phone Info</button>
+                <button ${disabled} style="background:#2563eb;font-weight:700;" onclick="openApp('${device.device_id}')">Open App on Phone</button>
               </div>
             </section>
 
@@ -533,6 +534,27 @@
         setTimeout(load, 5000);
       } catch (error) {
         message('Upload request failed: ' + error.message);
+      }
+    }
+
+    async function openApp(deviceId) {
+      const key = requireCommandKey();
+      if (!key || !confirmRequest('Open App on Phone', deviceId)) return;
+      message('Sending open app command...');
+      const command = byId('command');
+      command.style.display = 'block';
+      command.textContent = `Backend received: POST /devices/${deviceId}/open-app\nSending command to wake and open app on phone...`;
+      try {
+        const response = await fetch('/devices/' + encodeURIComponent(deviceId) + '/open-app', {
+          method: 'POST',
+          headers: { 'x-api-key': key }
+        });
+        const text = await response.text();
+        if (!response.ok) throw Error(text);
+        message(text);
+        setTimeout(load, 3000);
+      } catch (error) {
+        message('Open app failed: ' + error.message);
       }
     }
 

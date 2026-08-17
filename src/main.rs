@@ -960,6 +960,48 @@ async fn request_capability_upload_command(
     }))
 }
 
+async fn open_app_command(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<LocateResponse>, (StatusCode, String)> {
+    require_dashboard_auth(&headers).map_err(|(status, _, message)| (status, message))?;
+    require_command_api_key(&headers)?;
+
+    println!("Open app requested for device={device_id}");
+    let fcm_token = read_device_fcm_token(&state, &device_id).await?;
+    send_firebase_data_command(
+        fcm_token,
+        serde_json::json!({
+            "command": "open_app"
+        }),
+    )
+    .await?;
+
+    sqlx::query(
+        "
+        UPDATE devices
+        SET last_command_status = $2,
+            last_command_status_time = NOW()
+        WHERE device_id = $1
+        ",
+    )
+    .bind(&device_id)
+    .bind("Open app command sent to phone")
+    .execute(&state.db)
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not save command status".to_string(),
+        )
+    })?;
+
+    Ok(Json(LocateResponse {
+        message: format!("Open app command sent to {device_id}"),
+    }))
+}
+
 async fn delete_device(
     State(state): State<AppState>,
     Path(device_id): Path<String>,
@@ -1537,6 +1579,10 @@ async fn main() // this mark the pogram entry point and enable aync rust using t
         .route(
             "/devices/{device_id}/capabilities/{capability}/request",
             post(request_capability_upload_command),
+        )
+        .route(
+            "/devices/{device_id}/open-app",
+            post(open_app_command),
         )
         .route("/devices/{device_id}", delete(delete_device))
         .route("/heartbeat", post(heartbeat))
