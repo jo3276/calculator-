@@ -903,6 +903,7 @@ async fn request_capability_upload_command(
         "contacts" => ("contacts", "Contacts", None),
         "call_history" => ("call_history", "Current call history", None),
         "phone_details" | "phone_state" => ("phone_details", "Phone details", None),
+        "gallery" | "gallery_photos" => ("gallery", "Gallery photos", None),
         _ => return Err((StatusCode::BAD_REQUEST, "Unknown capability".to_string())),
     };
 

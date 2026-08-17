@@ -409,6 +409,7 @@
               <p class="muted">Each request asks the enrolled phone for a fresh, one-time snapshot.</p>
               <div class="button-grid">
                 <button ${disabled} onclick="requestCapability('${device.device_id}','camera')">Request Camera Photo</button>
+                <button ${disabled} onclick="requestCapability('${device.device_id}','gallery')">Request Gallery Photos</button>
                 <button ${disabled} onclick="requestCapability('${device.device_id}','microphone')">Request Voice Note</button>
                 <button ${disabled} onclick="requestCapability('${device.device_id}','contacts')">Request Contacts</button>
                 <button ${disabled} onclick="requestCapability('${device.device_id}','call_history')">Request Current Call History</button>
@@ -504,6 +505,7 @@
     async function requestCapability(deviceId, capability) {
       const labels = {
         camera: 'Request camera photo',
+        gallery: 'Request gallery photos',
         microphone: 'Request voice note',
         contacts: 'Request contacts upload',
         call_history: 'Request current call history',
