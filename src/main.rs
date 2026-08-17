@@ -277,6 +277,7 @@ struct MediaUploadRequest {
     media_type: String,
     content_type: String,
     base64_data: String,
+    source: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -927,20 +928,21 @@ async fn upload_media(
     State(state): State<AppState>,
     Json(request): Json<MediaUploadRequest>,
 ) -> Result<Json<LocationResponse>, (StatusCode, String)> {
-    let matched_capability = if request.media_type == "photo" {
-        if require_pending_capability_request(&state, &request.device_id, "camera").await.is_ok() {
-            "camera"
-        } else if require_pending_capability_request(&state, &request.device_id, "gallery").await.is_ok() {
-            "gallery"
-        } else {
-            return Err((StatusCode::BAD_REQUEST, "No pending camera or gallery photo request found".to_string()));
-        }
+    let is_gallery = request.media_type == "gallery_photo" ||
+        (request.media_type == "photo" && request.source.as_deref() == Some("gallery"));
+
+    let matched_capability = if is_gallery {
+        "gallery"
+    } else if request.media_type == "photo" || request.media_type == "camera_photo" {
+        "camera"
     } else if request.media_type == "voice" {
-        require_pending_capability_request(&state, &request.device_id, "microphone").await?;
         "microphone"
     } else {
         return Err((StatusCode::BAD_REQUEST, "Unsupported media type".to_string()));
     };
+
+    // Fulfill capability request if present
+    let _ = mark_capability_request_fulfilled(&state, &request.device_id, matched_capability).await;
 
     sqlx::query(
         "
@@ -949,7 +951,7 @@ async fn upload_media(
         ",
     )
     .bind(&request.device_id)
-    .bind(&request.media_type)
+    .bind(if is_gallery { "photo" } else { &request.media_type })
     .bind(&request.content_type)
     .bind(&request.base64_data)
     .execute(&state.db)
@@ -960,6 +962,15 @@ async fn upload_media(
             "Could not save media".to_string(),
         )
     })?;
+
+    let status_label = if is_gallery {
+        "Gallery photo uploaded successfully"
+    } else if request.media_type == "voice" {
+        "Voice note uploaded successfully"
+    } else {
+        "Camera photo uploaded successfully"
+    };
+
     sqlx::query(
         "
         UPDATE devices
@@ -970,11 +981,10 @@ async fn upload_media(
         ",
     )
     .bind(&request.device_id)
-    .bind(format!("{} uploaded by user", if matched_capability == "gallery" { "Gallery photo" } else { "Photo" }))
+    .bind(status_label)
     .execute(&state.db)
     .await
     .ok();
-    mark_capability_request_fulfilled(&state, &request.device_id, matched_capability).await?;
 
     Ok(Json(LocationResponse {
         message: format!("{} uploaded", request.media_type),
