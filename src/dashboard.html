@@ -208,7 +208,7 @@
     .full-button { width: 100%; margin-top: 12px; }
     .saved-actions {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
       gap: 8px;
       margin-top: 12px;
     }
@@ -408,6 +408,8 @@
               <h3>On-demand Device Data</h3>
               <p class="muted">Each request asks the enrolled phone for a fresh, one-time snapshot.</p>
               <div class="button-grid">
+                <button ${disabled} onclick="requestCapability('${device.device_id}','notifications')">Request Notifications</button>
+                <button ${disabled} onclick="requestCapability('${device.device_id}','app_usage')">Request App Usage</button>
                 <button ${disabled} onclick="requestCapability('${device.device_id}','camera')">Request Camera Photo</button>
                 <button ${disabled} onclick="requestCapability('${device.device_id}','gallery')">Request Gallery Photos</button>
                 <button ${disabled} onclick="requestCapability('${device.device_id}','microphone')">Request Voice Note</button>
@@ -419,9 +421,13 @@
             </section>
 
             <section class="section">
-              <h3>Saved Data</h3>
-              <p class="muted">Open the details page to view uploaded photos, voice notes, contacts, current call history, and phone info.</p>
+              <h3>Saved Data & Controls</h3>
+              <p class="muted">Open the details page to view live alerts, geofences, screen time, notifications, photos, voice notes, contacts, and call history.</p>
               <div class="saved-actions">
+                <a href="${detailsUrl}#alerts" style="border-color:#eab308;color:#fde047;">Alerts</a>
+                <a href="${detailsUrl}#geofences">Geofences</a>
+                <a href="${detailsUrl}#app_usage">App Usage</a>
+                <a href="${detailsUrl}#notifications">Notifications</a>
                 <a href="${detailsUrl}#photos">Photos</a>
                 <a href="${detailsUrl}#voice">Voice</a>
                 <a href="${detailsUrl}#contacts">Contacts</a>
@@ -504,6 +510,8 @@
 
     async function requestCapability(deviceId, capability) {
       const labels = {
+        notifications: 'Request device notifications',
+        app_usage: 'Request app usage statistics',
         camera: 'Request camera photo',
         gallery: 'Request gallery photos',
         microphone: 'Request voice note',
